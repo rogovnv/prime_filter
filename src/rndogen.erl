@@ -11,15 +11,17 @@
 
 -behaviour(gen_server).
 
+-include("moo_record.hrl").
 %% API
 -export([start_link/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
+
 %% -export([ca/5, one/4, two/5, three/5]).
 -define(SERVER, ?MODULE).
 
--record(rnd_state, {ip, interval, port, r_db, r_list, r_set, tref, ca, h1, h2, h3, h4, h5, h6}). 
+-record(rnd_state, {ip, interval, port, r_db, r_list, r_set, ca, fa, h1, h2, h3, h4}). 
 
 %% Ip, Port, R_db, Interval, R_list, R_set  - external parameters
 
@@ -65,40 +67,44 @@ handle_call(_Request, _From, State) ->
 
 handle_cast(afterinit, State) ->
 	#rnd_state{ip=Ip, port=Port, r_db = Rdb, r_list = Rlist, r_set = Rset, interval = N}=State,
-	RN=[13, 10],
-	{ok, Sock}=gen_tcp:connect(Ip, Port, [list, {active, true}], 3),
-	X="*2"++RN++"$6"++RN++"SELECT"++RN++"$"++integer_to_list(length(Rdb))++RN++Rdb++RN,
-	gen_tcp:send(Sock, list_to_binary(X)),
-	receive
-		_Data ->
-			ok
-	end,
-	gen_tcp:close(Sock),
-	L=satel:erat(),
-	CA=spawn(ca, ca, [-1, N, Ip, Port, Rlist, 0, 0]),
-	H1=spawn(satel, filter, [Ip, Port, Rset, Rlist, L]), 
-	H2=spawn(satel, filter, [Ip, Port, Rset, Rlist, L]),
-	H3=spawn(satel, filter, [Ip, Port, Rset, Rlist, L]),
-	H4=spawn(satel, filter, [Ip, Port, Rset, Rlist, L]),
-	%% H5=spawn(satel, filter, [Ip, Port, Rset, Rlist, L]),
-	%% H6=spawn(satel, filter, [Ip, Port, Rset, Rlist, L]),
-    %% FA=spawn(satel, fa, [Ip, Port, Rlist, Nman, -1]),
-	{noreply, State#rnd_state{ca=CA, h1=H1, h2=H2, h3=H3, h4=H4,h5=nop, h6=nop}};
+	%% RN=[13, 10],
+	IpS=integer_to_list(element(1, Ip))++"."++integer_to_list(element(2, Ip))++"."++integer_to_list(element(3, Ip))++"."++integer_to_list(element(4, Ip)),
+	case eredis:start_link(IpS, Port, Rdb) of
+		{ok, FA} ->
+			L=satel:erat(),
+			%% FA=spawn(satel, fa, [Ip, Port, Rlist]),
+			Rca=#rnd_ca{interval=N, ip=Ip, port=Port, r_list=Rlist, pid=self(), r_db=Rdb},
+			CA=spawn(ca, ca, [{-1, Rca}]),
+			Rsat=#rnd_sat{ip=Ip, port=Port, r_set=Rset, lst=L, fapid=FA, r_list=Rlist},
+			H1=spawn(satel, filter, [Rsat#rnd_sat{num=1}]), 
+			H2=spawn(satel, filter, [Rsat#rnd_sat{num=2}]),
+			H3=spawn(satel, filter, [Rsat#rnd_sat{num=3}]),
+			%% H4=spawn(satel, filter, [Rsat#rnd_sat{num=4}]),
+			{noreply, State#rnd_state{ca=CA, fa=FA, h1=H1, h2=H2, h3=H3}};
+		_Error ->
+			io:format("~nNo connection to DB.~n"),
+			top_sup:stop(),
+			{noreply, State}
+		end;
 
-handle_cast({tref, Tr}, State) ->
-	Old=State#rnd_state.tref,
-	{noreply, State#rnd_state{tref = [Tr|Old]}};
+handle_cast({ch_pid, Num,  Pid}, State) ->
+	case Num of
+		1 ->
+			{noreply, State#rnd_state{h1=Pid}};
+		2 ->
+			{noreply, State#rnd_state{h2=Pid}};
+		3 ->
+			{noreply, State#rnd_state{h3=Pid}}
+	end;
 
 handle_cast(stop, State) ->
-	#rnd_state{tref = Tr, ca=CA, h1=H1, h2=H2, h3=H3, h4=H4}=State,
-	timer:cancel(Tr),
+	#rnd_state{ca=CA, fa=FA, h1=H1, h2=H2, h3=H3}=State,
 	CA!stop,
 	exit(H1, kill),
 	exit(H2, kill),
 	exit(H3, kill),
-	exit(H4, kill),
-	%% exit(H5, kill),
-	%% exit(H6, kill),
+	%% exit(H4, kill),
+	exit(FA, kill),
 	{stop, normal, State#rnd_state{h1=nop}};
 
 handle_cast(_Any, State) ->
@@ -110,7 +116,8 @@ handle_cast(_Any, State) ->
   {noreply, NewState :: #rnd_state{}} |
   {noreply, NewState :: #rnd_state{}, timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: #rnd_state{}}).
-handle_info(_Info, State) ->
+
+  handle_info(_Info, State) ->
   {noreply, State}.
 
 %% @private
@@ -121,17 +128,15 @@ handle_info(_Info, State) ->
 -spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
     State :: #rnd_state{}) -> term()).
 terminate(_Reason, State) ->
-	#rnd_state{tref = Tr, ca=CA,h1=H1, h2=H2, h3=H3, h4=H4}=State,
+	#rnd_state{ca=CA, fa=FA, h1=H1, h2=H2, h3=H3}=State,
 	case is_pid(H1) of
 		true ->
-			timer:cancel(Tr),
 			CA!stop,
 			exit(H1, kill),
 			exit(H2, kill),
 			exit(H3, kill),
-			exit(H4, kill);
-			%% exit(H5, kill),
-			%% exit(H6, kill);
+			%% exit(H4, kill),
+			exit(FA, kill);
 		false -> ok
 	end.
 

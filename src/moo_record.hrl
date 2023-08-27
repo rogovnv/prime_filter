@@ -1,0 +1,3 @@
+-record(rnd_ca, {interval, ip, port, r_list, r_db, pid, one, two, three, tref}).
+-record(rnd_sat, {ip, port, r_set, lst, fapid, r_list, num}).
+-record(worker, {interval, ip, port, r_list, r_db, pid, period, tme, conn, cnt}).

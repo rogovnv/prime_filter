@@ -8,8 +8,9 @@
 %%%-------------------------------------------------------------------
 {application, prime_filter, [
   {description, "Generator&Filter for primes"},
+  {modules, [ca, prime_filter, rndogen, satel, top_sup]},
   {vsn, "1.0"},
-  {registered, [top_sup]},
+  {registered, [top_sup, rndogen]},
   {applications, [
     sasl,
     kernel,

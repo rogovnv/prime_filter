@@ -66,7 +66,11 @@ start(_StartType, _StartArgs) ->
         Str2 ->
             list_to_integer(Str2)
         end,
-      R_db=proplists:get_value("redis_db", Params, nop),
+      R_db=case proplists:get_value("redis_db", Params, nop) of
+        nop -> nop;
+        Str4 ->
+          list_to_integer(Str4)
+        end,
       Interval= case proplists:get_value("interval", Params, nop) of
         nop -> nop;
         Str3 ->

@@ -1,6 +1,9 @@
 -module(satel).
--export([filter/5, expr/2, get_uv/4, get_uv/6, erat/0, expr/3, un/2, vn/2, get_j/3, send_prime/4]).
 
+-include("moo_record.hrl").
+
+-export([filter/1, expr/2, get_uv/4, get_uv/6, erat/0, expr/3, un/2, vn/2, get_j/3, send_prime/4,fa/3]).
+%% -import(eredis).
 %% ok
 %% let's try to bend it
 %% D number [5, -7, 9, -11 etc.]
@@ -25,29 +28,32 @@
 %% strong test' set INCLUDED TO simple test' set, hence, the 2nd set has more elements
 %% 
 
-fa_handler(Ip, Port, Rlist) -> 
-	RN=[13, 10],
-	S1=gen_tcp:connect(Ip, Port, [list, {active, true}], 1),
-	case S1 of
-		{ok, Sock1}->
-			Msgto="*2\r\n$4\r\nLPOP\r\n$"++integer_to_list(length(Rlist))++RN++Rlist++RN,
-			gen_tcp:send(Sock1, Msgto),
-			Dta=receive
-				D -> D
-			end,
-			gen_tcp:close(Sock1),
-			case Dta of
-				{tcp, _, Data} -> 
-					Msg=string:split(Data, "\r\n", all),
+fa(Ip, Port, Rlist) -> 
+	receive
+		{gimme, Pid} ->
+			RN=[13, 10],
+			S=gen_tcp:connect(Ip, Port, [list, {active, true}], 3),
+			Res=case S of
+				{ok, Sock}->
+					Msgto="*2\r\n$4\r\nLPOP\r\n$"++integer_to_list(length(Rlist))++RN++Rlist++RN,
+					gen_tcp:send(Sock, Msgto),
+					Dta=receive
+						{tcp, _, D} -> D
+					end,
+					gen_tcp:close(Sock),
+					Msg=string:split(Dta, "\r\n", all),
 					case length(Msg) of
 						3 ->  %% $numlength numstring [empty]
 							lists:nth(2, Msg);
 						_Any1 -> 
 							"ok"
 					end;
-				_Else -> "ok"
-			end;
-		_Any2 -> "ok"
+				_Any2 -> "ok"
+			end,
+			Pid!{takeit, Res},
+			fa(Ip, Port, Rlist);
+		_Any ->
+			fa(Ip, Port, Rlist)
 	end.
 
 erat() ->
@@ -57,7 +63,7 @@ erat_gen([H|T], Acc) when H > 997 -> lists:flatten([lists:reverse(lists:flatten(
 erat_gen([H|T], Acc) ->
 	erat_gen(lists:filter(fun(El) -> (El rem H) /=0 end, T), [H|Acc]).
 
-%% i had a trouble with garbage collectiopn of smapp elements: pids/ports and data sets, so any VOID communications handles dedicated entity
+%% i had a trouble with garbage collectiopn of small elements: pids/ports and data sets, so any VOID communications handles dedicated entity
 
 send_prime(Ip, Port, Msg, Attempt) ->
 	S=gen_tcp:connect(Ip, Port, [list, {active, true}], 3),
@@ -65,7 +71,7 @@ send_prime(Ip, Port, Msg, Attempt) ->
 		{ok, Sock} ->
 			gen_tcp:send(Sock, list_to_binary(Msg)),
 			receive
-				_Dta -> ok
+				_Dta -> ok 
 			end,
 			gen_tcp:close(Sock),
 			exit(kill);
@@ -77,8 +83,16 @@ send_prime(Ip, Port, Msg, Attempt) ->
 			end
 	end.
 
-filter(Ip, Port, Rset, Rlist, L) -> %% BPSW test
-	Dta=fa_handler(Ip, Port, Rlist),
+filter(#rnd_sat{r_set=Rset, r_list=Rlist, lst=L, fapid=FA}=R_sat) -> %% BPSW test
+	%% FA!{gimme, self()},
+	%% Dta=receive
+	%% 	{takeit, Dat} -> Dat
+	%% end,
+	{ok, Bin}=eredis:q(FA, ["LPOP", Rlist]),
+	Dta=case is_binary(Bin) of
+		true -> binary_to_list(Bin);
+		false -> "nop"
+	end,
 	Tryit=re:run(Dta, "[0-9]+"),
 	case Tryit of
 		{match, [{Bg, Ln}]} ->
@@ -91,12 +105,13 @@ filter(Ip, Port, Rset, Rlist, L) -> %% BPSW test
 					if
 						Bool2 == true -> %% prime
 							Num=integer_to_list(Number),
-							Msg="*3\r\n$4\r\nSADD\r\n$"++integer_to_list(length(Rset))++"\r\n"++Rset++"\r\n$"++integer_to_list(length(Num))++"\r\n"++Num++"\r\n",
-							spawn(satel, send_prime, [Ip, Port, Msg, 1]);
+							%% Msg="*3\r\n$4\r\nSADD\r\n$"++integer_to_list(length(Rset))++"\r\n"++Rset++"\r\n$"++integer_to_list(length(Num))++"\r\n"++Num++"\r\n",
+							%% spawn(satel, send_prime, [Ip, Port, Msg, 1]);
+							eredis:q(FA, ["SADD", Rset, Num]);
 						Number < 1000000 -> %% not prime
 							ok;
 						true -> 
-							Bool=lists:foldl(fun(El, A) -> (not ((Number rem El) == 0)) and A end, true, [3, 5, 7, 11]) andalso  not fullsq(Number),
+							Bool=lists:foldl(fun(El, A) -> (not ((Number rem El) == 0)) and A end, true, [3, 5, 7, 11, 13, 17]) andalso  not fullsq(Number),
 							case Bool of
 								true -> %% maybe
 									%% Miller-Rabin
@@ -126,8 +141,9 @@ filter(Ip, Port, Rset, Rlist, L) -> %% BPSW test
 									case Res of
 										true ->
 											Snum=integer_to_list(Number),
-											Msg2="*3\r\n$4\r\nSADD\r\n$"++integer_to_list(length(Rset))++"\r\n"++Rset++"\r\n$"++integer_to_list(length(Snum))++"\r\n"++Snum++"\r\n",
-											spawn(satel, send_prime, [Ip, Port, Msg2, 1]);
+											%% Msg2="*3\r\n$4\r\nSADD\r\n$"++integer_to_list(length(Rset))++"\r\n"++Rset++"\r\n$"++integer_to_list(length(Snum))++"\r\n"++Snum++"\r\n",
+											%% spawn(satel, send_prime, [Ip, Port, Msg2, 1]);
+											eredis:q(FA, ["SADD", Rset, Snum]);
 										false -> 
 											ok
 									end;
@@ -139,7 +155,8 @@ filter(Ip, Port, Rset, Rlist, L) -> %% BPSW test
 		_Nop ->
 			ok
 	end,
-	filter(Ip, Port, Rset, Rlist, L). 
+	filter(R_sat).
+	%% gen_server:cast(rndogen, {ch_pid, Num, NewPid}), 
 
 %% strong test Luca for V	
 fv([], _, _, _, _, Res) -> Res;

@@ -13,6 +13,7 @@
 
 %% API
 -export([start_link/1]).
+-export([stop/0]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -57,6 +58,11 @@ init([{Ip, Port, R_db, Interval, R_list, R_set}]) ->
     modules => []},
 
   {ok, {SupFlags, [AChild]}}.
+
+stop() ->
+  gen_server:cast(rndogen, stop),
+  timer:sleep(1000),
+  init:stop().
 
 %%%===================================================================
 %%% Internal functions
