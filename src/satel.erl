@@ -1,7 +1,5 @@
 -module(satel).
 
--include("moo_record.hrl").
-
 -export([filter/1, expr/2, get_uv/4, get_uv/6, erat/0, expr/3, un/2, vn/2, get_j/3, send_prime/4,fa/3]).
 %% -import(eredis).
 %% ok
@@ -83,7 +81,7 @@ send_prime(Ip, Port, Msg, Attempt) ->
 			end
 	end.
 
-filter(#rnd_sat{r_set=Rset, r_list=Rlist, lst=L, fapid=FA}=R_sat) -> %% BPSW test
+filter({Ip, Port, Rset, L, FA, Rlist}) -> %% BPSW test
 	%% FA!{gimme, self()},
 	%% Dta=receive
 	%% 	{takeit, Dat} -> Dat
@@ -155,7 +153,7 @@ filter(#rnd_sat{r_set=Rset, r_list=Rlist, lst=L, fapid=FA}=R_sat) -> %% BPSW tes
 		_Nop ->
 			ok
 	end,
-	filter(R_sat).
+	filter({Ip, Port, Rset, L, FA, Rlist}).
 	%% gen_server:cast(rndogen, {ch_pid, Num, NewPid}), 
 
 %% strong test Luca for V	

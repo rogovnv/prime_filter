@@ -52,7 +52,7 @@ init([{Ip, Port, R_db, Interval, R_list, R_set}]) ->
 
   AChild = #{id => rndogen,
     start => {rndogen, start_link, [{Ip, Port, R_db, Interval, R_list, R_set}]},
-    restart => permanent,
+    restart => transient,
     shutdown => 2000,
     type => worker,
     modules => []},

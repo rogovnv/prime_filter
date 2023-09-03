@@ -11,7 +11,6 @@
 
 -behaviour(gen_server).
 
--include("moo_record.hrl").
 %% API
 -export([start_link/1]).
 
@@ -21,7 +20,7 @@
 %% -export([ca/5, one/4, two/5, three/5]).
 -define(SERVER, ?MODULE).
 
--record(rnd_state, {ip, interval, port, r_db, r_list, r_set, ca, fa, h1, h2, h3, h4}). 
+-record(rnd_state, {ip, interval, port, r_db, r_list, r_set, ca, fa, noconncnt, handlers, mca, monitors}). 
 
 %% Ip, Port, R_db, Interval, R_list, R_set  - external parameters
 
@@ -47,7 +46,7 @@ start_link(Data) ->
 init([{Ip, Port, R_db, Interval, R_list, R_set}]) ->
   process_flag(trap_exit, true),
   gen_server:cast(self(), afterinit),
-  {ok, #rnd_state{ip=Ip, port=Port, r_db=R_db, r_list=R_list, r_set=R_set, interval=Interval}}.
+  {ok, #rnd_state{ip=Ip, port=Port, r_db=R_db, r_list=R_list, r_set=R_set, interval=Interval, noconncnt=0}}.
 
 %% @private
 %% @doc Handling call messages
@@ -66,46 +65,44 @@ handle_call(_Request, _From, State) ->
 %% @doc Handling cast messages
 
 handle_cast(afterinit, State) ->
-	#rnd_state{ip=Ip, port=Port, r_db = Rdb, r_list = Rlist, r_set = Rset, interval = N}=State,
+	#rnd_state{ interval = N, ip=Ip, port=Port, r_db = Rdb, r_list = Rlist, r_set = Rset}=State,
 	%% RN=[13, 10],
 	IpS=integer_to_list(element(1, Ip))++"."++integer_to_list(element(2, Ip))++"."++integer_to_list(element(3, Ip))++"."++integer_to_list(element(4, Ip)),
 	case eredis:start_link(IpS, Port, Rdb) of
 		{ok, FA} ->
 			L=satel:erat(),
 			%% FA=spawn(satel, fa, [Ip, Port, Rlist]),
-			Rca=#rnd_ca{interval=N, ip=Ip, port=Port, r_list=Rlist, pid=self(), r_db=Rdb},
+			Rca={N, Ip, Port, Rlist, Rdb, 0},
 			CA=spawn(ca, ca, [{-1, Rca}]),
-			Rsat=#rnd_sat{ip=Ip, port=Port, r_set=Rset, lst=L, fapid=FA, r_list=Rlist},
-			H1=spawn(satel, filter, [Rsat#rnd_sat{num=1}]), 
-			H2=spawn(satel, filter, [Rsat#rnd_sat{num=2}]),
-			H3=spawn(satel, filter, [Rsat#rnd_sat{num=3}]),
-			%% H4=spawn(satel, filter, [Rsat#rnd_sat{num=4}]),
-			{noreply, State#rnd_state{ca=CA, fa=FA, h1=H1, h2=H2, h3=H3}};
+			Rsat={Ip, Port, Rset, L, FA, Rlist},
+			%% Idx=case length(integer_to_list(N)) <7 of
+			%% 	true ->
+			%% 		3;
+			%% 	false -> 
+			%% 		5
+			%%	end,
+			Hs=lists:map(fun(_X) -> spawn(satel, filter, [Rsat]) end, lists:seq(1, 3)),
+			Ms=[erlang:monitor(process, X)||X <- Hs],
+			Mca=erlang:monitor(process, CA),
+			{noreply, State#rnd_state{ca=CA, fa=FA, handlers=Hs, mca=Mca, monitors=Ms}};
 		_Error ->
 			io:format("~nNo connection to DB.~n"),
 			top_sup:stop(),
 			{noreply, State}
 		end;
 
-handle_cast({ch_pid, Num,  Pid}, State) ->
-	case Num of
-		1 ->
-			{noreply, State#rnd_state{h1=Pid}};
-		2 ->
-			{noreply, State#rnd_state{h2=Pid}};
-		3 ->
-			{noreply, State#rnd_state{h3=Pid}}
-	end;
+handle_cast(noconn, #rnd_state{noconncnt = N}=State) ->
+	N==1 andalso top_sup:stop(),
+	{noreply, State#rnd_state{noconncnt=N+1}};
 
 handle_cast(stop, State) ->
-	#rnd_state{ca=CA, fa=FA, h1=H1, h2=H2, h3=H3}=State,
+	#rnd_state{ca=CA, fa=FA, handlers = Hs, monitors=Mons, mca = Mca}=State,
+	[erlang:demonitor(X)||X<-Mons],
+	erlang:demonitor(Mca),
 	CA!stop,
-	exit(H1, kill),
-	exit(H2, kill),
-	exit(H3, kill),
-	%% exit(H4, kill),
+	[exit(X)||X <-Hs],
 	exit(FA, kill),
-	{stop, normal, State#rnd_state{h1=nop}};
+	{stop, normal, State#rnd_state{handlers=nop}};
 
 handle_cast(_Any, State) ->
   {noreply, State}.
@@ -117,7 +114,33 @@ handle_cast(_Any, State) ->
   {noreply, NewState :: #rnd_state{}, timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: #rnd_state{}}).
 
-  handle_info(_Info, State) ->
+
+handle_info({'DOWN', Ref, prosess, Pid, _Reason}, State) ->
+	#rnd_state{handlers = Hs, monitors=Mons, mca = Mca, ip = Ip, port = Port, r_set = Rset, r_list=Rlist, fa=FA, interval = N, r_db = Rdb}=State,
+	case lists:member(Ref, Mons) of
+		true ->
+			erlang:demonitor(Ref),
+			L=satel:erat(),
+			Rsat={Ip, Port, Rset, L, FA, Rlist},
+			NewPid=spawn(satel, filter, [Rsat]),
+			NewMon=erlang:monitor(process, NewPid),
+			MedP=lists:delete(Ref, Mons),
+			MedM=lists:delete(Pid, Hs),
+			{noreply, State#rnd_state{monitors=[NewMon|MedM], handlers=[NewPid|MedP]}};
+		false ->
+			case Ref==Mca of
+				true ->
+					erlang:demonitor(Ref),
+					Rca={N, Ip, Port, Rlist, Rdb},
+					NewCA=spawn(ca, ca, [{-1, Rca}]),
+					NewMca=erlang:monitor(process, NewCA),
+					{noreply, State#rnd_state{ca=NewCA, mca=NewMca}};
+				false ->
+					wtf,
+					{noreply, State}
+			end
+	end;
+handle_info(_Info, State) ->
   {noreply, State}.
 
 %% @private
@@ -128,14 +151,13 @@ handle_cast(_Any, State) ->
 -spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
     State :: #rnd_state{}) -> term()).
 terminate(_Reason, State) ->
-	#rnd_state{ca=CA, fa=FA, h1=H1, h2=H2, h3=H3}=State,
-	case is_pid(H1) of
+	#rnd_state{ca=CA, fa=FA, handlers = Hs, monitors=Mons, mca = Mca}=State,
+	case is_list(Hs) of
 		true ->
+			[erlang:demonitor(X, [flush])||X<-Mons],
+			erlang:demonitor(Mca, [flush]),
 			CA!stop,
-			exit(H1, kill),
-			exit(H2, kill),
-			exit(H3, kill),
-			%% exit(H4, kill),
+			[exit(X)||X <-Hs],
 			exit(FA, kill);
 		false -> ok
 	end.

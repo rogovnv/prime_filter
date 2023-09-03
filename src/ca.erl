@@ -1,32 +1,26 @@
 -module(ca).
 
-%% -import("moo_record.hrl").
-
 -export([ca/1, sendme/1, two/1]).
 
--record(rnd_ca, {interval, ip, port, r_list, pid, one, two, three, tref, r_db}).
--record(worker, {interval, ip, port, r_list, r_db, pid, period, tme, conn, cnt}).
+-record(rnd_ca, {one, two, three, tref, mons, interval, ip, port, r_list, r_db, errcnt}).
+-record(worker, {interval, ip, port, r_list, r_db, period, tme, conn}).
 
-ca({-1, Start_rec}) -> 
-    #rnd_ca{interval=N, ip=Ip, port=Port, r_list=Rlist,pid=Pid, r_db=Rdb}=Start_rec,
-    R1=#worker{interval=N, ip=Ip, port=Port, r_list=Rlist, pid=self(), r_db=Rdb},
-    R2=#worker{interval=N, ip=Ip, port=Port, r_list=Rlist, period=333000, pid=self(), tme=0, r_db=Rdb},
-    R3=#worker{interval=N, ip=Ip, port=Port, r_list=Rlist, period=666000, pid=self(), tme=0, r_db=Rdb},
+ca({-1, {N, Ip, Port, Rlist, Rdb, Erct}}) -> 
+    R1=#worker{interval=N, ip=Ip, port=Port, r_list=Rlist, r_db=Rdb},
+    R2=#worker{interval=N, ip=Ip, port=Port, r_list=Rlist, period=333000, tme=0, r_db=Rdb},
+    R3=#worker{interval=N, ip=Ip, port=Port, r_list=Rlist, period=666000, tme=0, r_db=Rdb},
     Sender=spawn(ca, sendme, [{-1, R1}]),
     Two=spawn(ca, two, [{-1, R2}]),
     Three=spawn(ca, two, [{-1, R3}]),
+    M1=erlang:monitor(process, Sender),
+    M2=erlang:monitor(process, Two),
+    M3=erlang:monitor(process, Three),
     timer:sleep(1000),
     {ok, Tr}=timer:send_interval(1, next),
-    ca({0, #rnd_ca{one=Sender,two=Two, three=Three, tref=Tr, pid=Pid}});
+    ca({0, #rnd_ca{one=Sender,two=Two, three=Three, tref=Tr, mons=[M1, M2, M3], ip=Ip, port=Port, r_list=Rlist, r_db=Rdb, interval=N, errcnt=Erct}});
 ca({0, My_rec}) ->
-    #rnd_ca{one=Sender,two=Two, three=Three, tref=Tr, pid=Pid}=My_rec,   
+    #rnd_ca{one=Sender,two=Two, three=Three, tref=Tr,mons=Ms, errcnt = Erct}=My_rec,   
 receive
-    noconn ->
-        timer:cancel(Tr),
-        Sender!stop,
-        Two!stop,
-        Three!stop,
-        Pid!noconn;
     next ->
         T=os:system_time(),
         Sender!gogo,
@@ -35,10 +29,20 @@ receive
         ca({0, My_rec});
     stop ->
         timer:cancel(Tr),
+        [erlang:demonitor(X, [flush])||X<-Ms],
         Sender!stop,
         Two!stop,
         Three!stop,
         exit(kill);
+    {'DOWN', _Ref, prosess, _Pid, _Reason} ->
+        timer:cancel(Tr),
+        [erlang:demonitor(X, [flush])||X<-Ms],
+        Sender!stop,
+        Two!stop,
+        Three!stop,
+        #rnd_ca{ip=Ip, port=Port, r_list=Rlist, r_db=Rdb, interval=N}=My_rec,
+        Erct==6 andalso gen_server:cast(rndogen, noconn),
+        ca({-1, {N, Ip, Port, Rlist, Rdb, Erct+1}});
     _Any -> ca({0, My_rec})
 end.
 
