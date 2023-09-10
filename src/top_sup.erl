@@ -61,7 +61,7 @@ init([{Ip, Port, R_db, Interval, R_list, R_set}]) ->
 
 stop() ->
   gen_server:cast(rndogen, stop),
-  timer:sleep(1000),
+  timer:sleep(30000),
   init:stop().
 
 %%%===================================================================

@@ -85,15 +85,16 @@ start(_StartType, _StartArgs) ->
             {ok, Pid} ->
               {ok, Pid};
             Error ->
-              io:format("~nError ~p", [Error])
+              io:format("~nError ~p", [Error]),
+              init:stop()
           end;
         false ->
           io:format("~nWrong params in /priv/conn.conf"),
-          exit(self(),kill)
+          init:stop()
         end;
     Other ->
       io:format("~nNo params in /priv : ~p", [Other]),
-      exit(self(),kill)
+      init:stop()
   end.
 
 %%--------------------------------------------------------------------

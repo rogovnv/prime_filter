@@ -20,7 +20,7 @@
 %% -export([ca/5, one/4, two/5, three/5]).
 -define(SERVER, ?MODULE).
 
--record(rnd_state, {ip, interval, port, r_db, r_list, r_set, ca, fa, noconncnt, handlers, mca, monitors}). 
+-record(rnd_state, {ip, interval, port, r_db, r_list, r_set, ca, fa, noconncnt, handlers, mca, mfa, monitors}). 
 
 %% Ip, Port, R_db, Interval, R_list, R_set  - external parameters
 
@@ -66,42 +66,40 @@ handle_call(_Request, _From, State) ->
 
 handle_cast(afterinit, State) ->
 	#rnd_state{ interval = N, ip=Ip, port=Port, r_db = Rdb, r_list = Rlist, r_set = Rset}=State,
-	%% RN=[13, 10],
-	IpS=integer_to_list(element(1, Ip))++"."++integer_to_list(element(2, Ip))++"."++integer_to_list(element(3, Ip))++"."++integer_to_list(element(4, Ip)),
-	case eredis:start_link(IpS, Port, Rdb) of
-		{ok, FA} ->
-			L=satel:erat(),
-			%% FA=spawn(satel, fa, [Ip, Port, Rlist]),
-			Rca={N, Ip, Port, Rlist, Rdb, 0},
-			CA=spawn(ca, ca, [{-1, Rca}]),
-			Rsat={Ip, Port, Rset, L, FA, Rlist},
-			%% Idx=case length(integer_to_list(N)) <7 of
-			%% 	true ->
-			%% 		3;
-			%% 	false -> 
-			%% 		5
-			%%	end,
-			Hs=lists:map(fun(_X) -> spawn(satel, filter, [Rsat]) end, lists:seq(1, 3)),
-			Ms=[erlang:monitor(process, X)||X <- Hs],
-			Mca=erlang:monitor(process, CA),
-			{noreply, State#rnd_state{ca=CA, fa=FA, handlers=Hs, mca=Mca, monitors=Ms}};
-		_Error ->
-			io:format("~nNo connection to DB.~n"),
-			top_sup:stop(),
-			{noreply, State}
-		end;
+	L=satel:erat(),
+	FA=spawn(satel, fa, [Ip, Port, Rlist, Rset, Rdb, {0,0}]),
+	Mfa=erlang:monitor(process, FA),
+	Rca={N, Ip, Port, Rlist, Rdb, 0},
+	CA=spawn(ca, ca, [{init_, Rca}]),
+	Rsat={Ip, Port, Rset, L, FA, Rlist},
+	Idx=case length(integer_to_list(N)) <7 of
+		true ->
+			2; 
+		false -> 
+			4 
+	end,
+	Hs=lists:map(fun(_X) -> spawn(satel, filter, [Rsat]) end, lists:seq(1, Idx)),
+	Ms=[erlang:monitor(process, X)||X <- Hs],
+	Mca=erlang:monitor(process, CA),
+	{noreply, State#rnd_state{ca=CA, fa=FA, handlers=Hs, mca=Mca, mfa=Mfa, monitors=Ms}};
+
+handle_cast(fadown, State) ->
+	top_sup:stop(),
+	{noreply, State};
 
 handle_cast(noconn, #rnd_state{noconncnt = N}=State) ->
 	N==1 andalso top_sup:stop(),
 	{noreply, State#rnd_state{noconncnt=N+1}};
 
 handle_cast(stop, State) ->
-	#rnd_state{ca=CA, fa=FA, handlers = Hs, monitors=Mons, mca = Mca}=State,
-	[erlang:demonitor(X)||X<-Mons],
-	erlang:demonitor(Mca),
+	#rnd_state{ca=CA, fa=FA, handlers = Hs, monitors=Mons, mca = Mca, mfa=Mfa}=State,
+	[erlang:demonitor(X, [flush])||X<-Mons],
+	erlang:demonitor(Mca, [flush]),
+	erlang:demonitor(Mfa, [flush]),
 	CA!stop,
-	[exit(X)||X <-Hs],
-	exit(FA, kill),
+	[exit(X, kill)||X <-Hs],
+	timer:sleep(25000),
+	FA!stop,
 	{stop, normal, State#rnd_state{handlers=nop}};
 
 handle_cast(_Any, State) ->
@@ -116,10 +114,10 @@ handle_cast(_Any, State) ->
 
 
 handle_info({'DOWN', Ref, prosess, Pid, _Reason}, State) ->
-	#rnd_state{handlers = Hs, monitors=Mons, mca = Mca, ip = Ip, port = Port, r_set = Rset, r_list=Rlist, fa=FA, interval = N, r_db = Rdb}=State,
+	#rnd_state{handlers = Hs, monitors=Mons, mca = Mca, mfa=Mfa, ip = Ip, port = Port, r_set = Rset, r_list=Rlist, fa=FA, interval = N, r_db = Rdb}=State,
 	case lists:member(Ref, Mons) of
 		true ->
-			erlang:demonitor(Ref),
+			erlang:demonitor(Ref, [flush]),
 			L=satel:erat(),
 			Rsat={Ip, Port, Rset, L, FA, Rlist},
 			NewPid=spawn(satel, filter, [Rsat]),
@@ -130,18 +128,29 @@ handle_info({'DOWN', Ref, prosess, Pid, _Reason}, State) ->
 		false ->
 			case Ref==Mca of
 				true ->
-					erlang:demonitor(Ref),
+					erlang:demonitor(Ref, [flush]),
 					Rca={N, Ip, Port, Rlist, Rdb},
 					NewCA=spawn(ca, ca, [{-1, Rca}]),
 					NewMca=erlang:monitor(process, NewCA),
 					{noreply, State#rnd_state{ca=NewCA, mca=NewMca}};
 				false ->
-					wtf,
-					{noreply, State}
+					case Ref=Mfa of
+						true->
+							erlang:demonitor(Ref, [flush]),
+							Lfa=[Ip, Port, Rlist, Rset, Rdb, {0,0}],
+							NewFA=spawn(satel, fa, Lfa),
+							NewMfa=erlang:monitor(process, NewFA),
+							{noreply, State#rnd_state{fa=NewFA, mfa=NewMfa}};
+						false ->
+							wtf,
+							{noreply, State}
+					end
 			end
 	end;
+handle_info({'EXIT', _From, _Reason}, State) ->
+	{stop, normal, State};
 handle_info(_Info, State) ->
-  {noreply, State}.
+	{noreply, State}.
 
 %% @private
 %% @doc This function is called by a gen_server when it is about to
@@ -157,8 +166,9 @@ terminate(_Reason, State) ->
 			[erlang:demonitor(X, [flush])||X<-Mons],
 			erlang:demonitor(Mca, [flush]),
 			CA!stop,
-			[exit(X)||X <-Hs],
-			exit(FA, kill);
+			[exit(X, kill)||X <-Hs],
+			timer:sleep(25000),
+			FA!stop;
 		false -> ok
 	end.
 
