@@ -1,6 +1,6 @@
 -module(satel).
 
--export([filter/1, erat/0, fa/6]).
+-export([filter/1, erat/0, fa/6, handler/2]).
 
 %% ok
 %% let's try to bend it
@@ -25,23 +25,37 @@
 %% 
 %% strong test' set INCLUDED TO simple test' set, hence, the 2nd set has more elements
 %% 
+%% but here I using Miller-Rabin`s test
 
 %% i/o handler for filter
 fa(_Ip, _Port, _Rlist, _Rset, _Rdb, 9) ->
 	receive
 		 _Any -> fa(_Ip, _Port, _Rlist, _Rset, _Rdb, 9)
 	end;
-fa(Ip, Port, Rlist, Rset, Rdb, {0, 0}) ->
-	ca:get_connect(Ip, Port,Rdb,0, self()),
-	receive
-		{sock, S} ->
-			fa(Ip, Port, Rlist, Rset, Rdb, {sock, S});
-		noconn ->
-			gen_server:cast(rndogen, fadown),
+fa(Ip, Port, Rlist, Rset, Rdb, {0, _Atmt}) ->
+	case ca:get_connect(Ip, Port, 0, Rdb) of
+        {ok, Sock} ->
+            fa(Ip, Port, Rlist, Rset, Rdb, {sock, Sock});
+        nop ->
+            gen_server:cast(rndogen, noconn),
 			fa(Ip, Port, Rlist, Rset, Rdb, 9)
-	end;
+    end;
 fa(Ip, Port, Rlist, Rset, Rdb, {sock, Sock}) -> 
 	receive
+		{queue, Pid} ->
+			gen_tcp:send(Sock, list_to_binary("LLEN "++Rlist++"\r\n")),
+			receive
+                	{tcp, Sock, Dta} ->
+						Pid!{queue, Dta},
+                    	fa(Ip, Port, Rlist, Rset, Rdb, {sock, Sock}); 
+            	    {tcp_closed, Sock} -> 
+						Pid!":0",
+                		fa(Ip, Port, Rlist, Rset, Rdb, {0, 0});
+                	{tcp_error, Sock, _Reason} ->
+						Pid!":0",
+                    	gen_server:cast(rndogen, fadown),
+						fa(Ip, Port, Rlist, Rset, Rdb, 9)
+            end;
 		{sendprime,Number} ->
 			Msg="SADD "++Rset++" "++Number++"\r\n",
 			gen_tcp:send(Sock, list_to_binary(Msg)),
@@ -55,16 +69,17 @@ fa(Ip, Port, Rlist, Rset, Rdb, {sock, Sock}) ->
 					fa(Ip, Port, Rlist, Rset, Rdb, 9)
 			end;
 		{gimme, Pid} ->
-			Msgto="LPOP "++Rlist++"\r\n",
+			Msgto="BLPOP "++Rlist++" 1\r\n",
 			gen_tcp:send(Sock, list_to_binary(Msgto)),
 			receive
 				{tcp, Sock, D} -> 
-					Msg=string:split(D, "\r\n", all),
-					Res=case length(Msg) of
-						3 ->  %% $numlength numstring [empty]
-							lists:nth(2, Msg);
-						_Any -> 
-							"ok"
+					io:format("~nsatel got ~p", [D]),
+					Res=case re:run(D, "[0-9]+", [global]) of
+						nomatch ->
+							"ok";
+						{match, List} ->
+							[{Bg, Len}]=hd(lists:reverse(List)),
+							lists:sublist(D, Bg+1, Len)
 					end,
 					Pid!{takeit, Res},
 					fa(Ip, Port, Rlist, Rset, Rdb, {sock, Sock});
@@ -93,7 +108,43 @@ erat_gen([H|T], Acc) when H > 997 -> lists:flatten([lists:reverse(lists:flatten(
 erat_gen([H|T], Acc) ->
 	erat_gen(lists:filter(fun(El) -> (El rem H) /=0 end, T), [H|Acc]).
 
-filter({Ip, Port, Rset, L, FA, Rlist}) -> 
+filter({{start, N}, FA}) ->
+	L=erat(),
+	{ok, Tr}=timer:send_interval(5000, test_perf),
+	Ps=lists:map(fun(_E) -> spawn(satel, handler, [L, FA]) end, lists:seq(1, N)),
+	filter({{loop, Ps, Tr}, FA});
+filter({{loop, Ps, Tr}, FA}) ->
+	receive
+		stop ->
+			timer:cancel(Tr),
+			Fn=fun(X) ->
+				try exit(X,kill)
+				catch _:_ -> ok
+				end
+			end,
+			[Fn(X)||X<-Ps],
+			exit(kill);
+		test_perf ->
+			FA!{queue, self()},
+			Data=receive
+				{queue, Dta} ->
+					Dta
+			end,
+			{match, [{Bg, Len}]}=re:run(Data, "[0-9]+"),
+			case list_to_integer(lists:sublist(Data, Bg+1, Len)) < 5000 of %% ask length of Rlist
+				true ->
+					filter({{loop, Ps, Tr}, FA});
+				false ->
+					case length(Ps) < 10 of
+						true ->
+							L=erat(),
+							filter({{loop, [spawn(satel, handler, [L, FA])|Ps], Tr}, FA});
+						false -> filter({{loop, Ps, Tr}, FA})
+					end
+			end
+	end.
+
+handler(L,FA) ->
 	FA!{gimme, self()},
 	Dta=receive
 		{takeit, Dat} -> Dat
@@ -113,7 +164,7 @@ filter({Ip, Port, Rset, L, FA, Rlist}) ->
 						Number < 1000000 -> %% not prime
 							ok;
 						true -> 				
-							Bool=lists:foldl(fun(El, A) -> (not ((Number rem El) == 0)) and A end, true, [3, 5, 7, 11, 13, 17]) andalso  not fullsq(Number),
+							Bool=lists:foldl(fun(El, A) -> (Number rem El /= 0) and A end, true, [3, 5, 7, 11, 13, 17]) andalso (fullsq(Number) == false),
 							case Bool of
 								true -> %% maybe
 									%% Miller-Rabin								
@@ -123,7 +174,7 @@ filter({Ip, Port, Rset, L, FA, Rlist}) ->
 										MR1=modexpr(split_expr(Testn, Dd, [], Nn), Number),
 										MR2=next_mr(Testn, Dd, Ss-1, Nn),
 										if
-											MR1/=1 orelse MR2/=true -> false;
+											MR1/=1 andalso MR2/=true -> false;
 											MR1==1 orelse MR2==true -> true
 										end
 									end,
@@ -142,7 +193,7 @@ filter({Ip, Port, Rset, L, FA, Rlist}) ->
 			end;
 		_Else -> ok
 	end,		
-	filter({Ip, Port, Rset, L, FA, Rlist}).
+	handler(L, FA).
 
 get_attempt(0, Acc) -> Acc;
 get_attempt(N, Acc) ->

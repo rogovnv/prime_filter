@@ -83,6 +83,7 @@ start(_StartType, _StartArgs) ->
         true ->
           case top_sup:start_link({Ip, Port, R_db, Interval, R_list, R_set}) of
             {ok, Pid} ->
+              io:format("~ntop_sup ~p ~p ~p ~p ~p ~p ~n", [Ip, Port, R_db, Interval, R_list, R_set]),
               {ok, Pid};
             Error ->
               io:format("~nError ~p", [Error]),

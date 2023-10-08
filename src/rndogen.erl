@@ -20,7 +20,7 @@
 %% -export([ca/5, one/4, two/5, three/5]).
 -define(SERVER, ?MODULE).
 
--record(rnd_state, {ip, interval, port, r_db, r_list, r_set, ca, fa, noconncnt, handlers, mca, mfa, monitors}). 
+-record(rnd_state, {ip, interval, port, r_db, r_list, r_set, ca, fa, go, handlers, mca, mfa, mgo, monitors}). 
 
 %% Ip, Port, R_db, Interval, R_list, R_set  - external parameters
 
@@ -46,7 +46,7 @@ start_link(Data) ->
 init([{Ip, Port, R_db, Interval, R_list, R_set}]) ->
   process_flag(trap_exit, true),
   gen_server:cast(self(), afterinit),
-  {ok, #rnd_state{ip=Ip, port=Port, r_db=R_db, r_list=R_list, r_set=R_set, interval=Interval, noconncnt=0}}.
+  {ok, #rnd_state{ip=Ip, port=Port, r_db=R_db, r_list=R_list, r_set=R_set, interval=Interval}}.
 
 %% @private
 %% @doc Handling call messages
@@ -66,40 +66,43 @@ handle_call(_Request, _From, State) ->
 
 handle_cast(afterinit, State) ->
 	#rnd_state{ interval = N, ip=Ip, port=Port, r_db = Rdb, r_list = Rlist, r_set = Rset}=State,
-	L=satel:erat(),
-	FA=spawn(satel, fa, [Ip, Port, Rlist, Rset, Rdb, {0,0}]),
+	Params1=[Ip, Port, Rlist, Rset, Rdb, {0,0}],
+	Params2=[Ip, Port, Rlist, Rset, Rdb, 0],
+	FA=spawn(satel, fa, Params1),
+	Pa=spawn(ca, gogo, Params2),
+	Pb=spawn(ca, gogo, Params2),
+	Pc=spawn(ca, gogo, Params2),
 	Mfa=erlang:monitor(process, FA),
-	Rca={N, Ip, Port, Rlist, Rdb, 0},
+	Mgo=lists:map(fun(X) -> erlang:monitor(process, X) end, [Pa, Pb, Pc]),
+	timer:sleep(3000),
+	Rca={N, Pa, Pb, Pc},
 	CA=spawn(ca, ca, [{init_, Rca}]),
-	Rsat={Ip, Port, Rset, L, FA, Rlist},
 	Idx=case length(integer_to_list(N)) <7 of
 		true ->
 			2; 
 		false -> 
 			4 
 	end,
-	Hs=lists:map(fun(_X) -> spawn(satel, filter, [Rsat]) end, lists:seq(1, Idx)),
-	Ms=[erlang:monitor(process, X)||X <- Hs],
+	Hs=spawn(satel, filter, [{{start, Idx}, FA}]),
+	Ms=erlang:monitor(process, Hs),
 	Mca=erlang:monitor(process, CA),
-	{noreply, State#rnd_state{ca=CA, fa=FA, handlers=Hs, mca=Mca, mfa=Mfa, monitors=Ms}};
+	{noreply, State#rnd_state{ca=CA, fa=FA, handlers=Hs, mca=Mca, mfa=Mfa, monitors=Ms, go=[Pa, Pb, Pc], mgo=Mgo}};
 
 handle_cast(fadown, State) ->
+	io:format("~nFA / CA / DOWN...~n"),
 	top_sup:stop(),
 	{noreply, State};
 
-handle_cast(noconn, #rnd_state{noconncnt = N}=State) ->
-	N==1 andalso top_sup:stop(),
-	{noreply, State#rnd_state{noconncnt=N+1}};
-
 handle_cast(stop, State) ->
-	#rnd_state{ca=CA, fa=FA, handlers = Hs, monitors=Mons, mca = Mca, mfa=Mfa}=State,
-	[erlang:demonitor(X, [flush])||X<-Mons],
+	#rnd_state{ca=CA, fa=FA, handlers = Hs, monitors=Mons, mca = Mca, mfa=Mfa, mgo=Mgo, go=GOGO}=State,
+	erlang:demonitor(Mons, [flush]),
 	erlang:demonitor(Mca, [flush]),
 	erlang:demonitor(Mfa, [flush]),
+	[erlang:demonitor(X, [flush])||X <- Mgo],
 	CA!stop,
-	[exit(X, kill)||X <-Hs],
-	timer:sleep(25000),
+	exit(Hs, kill),
 	FA!stop,
+	[X!stop||X <- GOGO],
 	{stop, normal, State#rnd_state{handlers=nop}};
 
 handle_cast(_Any, State) ->
@@ -112,27 +115,36 @@ handle_cast(_Any, State) ->
   {noreply, NewState :: #rnd_state{}, timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: #rnd_state{}}).
 
-
-handle_info({'DOWN', Ref, prosess, Pid, _Reason}, State) ->
-	#rnd_state{handlers = Hs, monitors=Mons, mca = Mca, mfa=Mfa, ip = Ip, port = Port, r_set = Rset, r_list=Rlist, fa=FA, interval = N, r_db = Rdb}=State,
-	case lists:member(Ref, Mons) of
+handle_info({'DOWN', Ref, prosess, _Pid, _Reason}, State) -> %% oh, use supervisors, Luke
+	#rnd_state{monitors=Mons, mca = Mca,  mfa=Mfa,go=GOGO, mgo=Mgo, ip = Ip, port = Port, r_set = Rset, r_list=Rlist, fa=FA, interval = N, r_db = Rdb}=State,
+	case Ref==Mons of
 		true ->
 			erlang:demonitor(Ref, [flush]),
-			L=satel:erat(),
-			Rsat={Ip, Port, Rset, L, FA, Rlist},
+			Idx=case length(integer_to_list(N)) <7 of
+				true ->
+					2; 
+				false -> 
+					4 
+			end,
+			Rsat={{start, Idx}, FA},
 			NewPid=spawn(satel, filter, [Rsat]),
 			NewMon=erlang:monitor(process, NewPid),
-			MedP=lists:delete(Ref, Mons),
-			MedM=lists:delete(Pid, Hs),
-			{noreply, State#rnd_state{monitors=[NewMon|MedM], handlers=[NewPid|MedP]}};
+			{noreply, State#rnd_state{monitors=NewMon, handlers=NewPid}};
 		false ->
-			case Ref==Mca of
+			case Ref==Mca orelse lists:member(Ref, Mgo) of
 				true ->
-					erlang:demonitor(Ref, [flush]),
-					Rca={N, Ip, Port, Rlist, Rdb},
-					NewCA=spawn(ca, ca, [{-1, Rca}]),
-					NewMca=erlang:monitor(process, NewCA),
-					{noreply, State#rnd_state{ca=NewCA, mca=NewMca}};
+					erlang:demonitor(Mca, [flush]),
+					[erlang:demonitor(X, [flush])||X <-Mgo],
+					case Ref==Mca of
+						false -> 
+							F=fun(X) -> try exit(X, kill) catch _:_ -> ok end end,
+							NewGo=[F(X)||X <- GOGO],
+							{noreply, State#rnd_state{go=NewGo, mgo=[erlang:demonitor(X, [flush])||X <-NewGo]}};
+						true -> 
+							NewCA=spawn(ca, ca, [{init_, {N, GOGO, 0}}]),
+							NewMca=erlang:monitor(process, NewCA),
+							{noreply, State#rnd_state{ca=NewCA, mca=NewMca}}
+						end;
 				false ->
 					case Ref=Mfa of
 						true->
@@ -147,8 +159,6 @@ handle_info({'DOWN', Ref, prosess, Pid, _Reason}, State) ->
 					end
 			end
 	end;
-handle_info({'EXIT', _From, _Reason}, State) ->
-	{stop, normal, State};
 handle_info(_Info, State) ->
 	{noreply, State}.
 
@@ -160,15 +170,16 @@ handle_info(_Info, State) ->
 -spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
     State :: #rnd_state{}) -> term()).
 terminate(_Reason, State) ->
-	#rnd_state{ca=CA, fa=FA, handlers = Hs, monitors=Mons, mca = Mca}=State,
-	case is_list(Hs) of
+	#rnd_state{ca=CA, fa=FA, handlers = Hs, monitors=Mons, mca = Mca, mgo=Mgo, go=GOGO}=State,
+	case is_pid(Hs) of
 		true ->
-			[erlang:demonitor(X, [flush])||X<-Mons],
+			erlang:demonitor(Mons, [flush]),
 			erlang:demonitor(Mca, [flush]),
+			[erlang:demonitor(X, [flush])||X <- Mgo],
 			CA!stop,
-			[exit(X, kill)||X <-Hs],
-			timer:sleep(25000),
-			FA!stop;
+			Hs!stop,
+			FA!stop,
+			[X!stop||X <- GOGO];
 		false -> ok
 	end.
 
@@ -183,4 +194,6 @@ code_change(_OldVsn, State = #rnd_state{}, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+			
+
 

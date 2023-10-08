@@ -60,8 +60,8 @@ init([{Ip, Port, R_db, Interval, R_list, R_set}]) ->
   {ok, {SupFlags, [AChild]}}.
 
 stop() ->
-  gen_server:cast(rndogen, stop),
-  timer:sleep(30000),
+  %% gen_server:cast(rndogen, stop),
+  %% timer:sleep(30000),
   init:stop().
 
 %%%===================================================================
